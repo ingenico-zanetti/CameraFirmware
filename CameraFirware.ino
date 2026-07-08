@@ -319,7 +319,7 @@ void loop(){
     }
     oldMillis = newMillis;
     divider++;
-    divider &= 0xFF;
+    divider &= 0xF;
   }
 
   uint16_t portA = GPIOA->IDR;
