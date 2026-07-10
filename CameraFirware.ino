@@ -80,18 +80,21 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 
 #define LED_COUNT_MAX (16)
 
+#define DATA_BYTES_PER_LED (9)
+#define PADDING_BYTES_PER_LED (1)
+#define BYTES_PER_LED (DATA_BYTES_PER_LED + PADDING_BYTES_PER_LED)
+
 // ---------------- SETUP ----------------
-unsigned char ledTx[1 + (LED_COUNT_MAX + 1) * 9 + 1]; // Add a fake LED after the real ones, to get something to receive on the SPI MISO, plus one extra 0 as first and last byte to get a clean MOSI whe not transmitting
-unsigned char ledRx[1 + (LED_COUNT_MAX + 1) * 9 + 1]; // Add a fake LED after the real ones, to get something to receive on the SPI MISO, plus one extra 0 as first and last byte to get a clean MOSI whe not transmitting
+unsigned char ledTx[1 + (LED_COUNT_MAX) * BYTES_PER_LED + 1]; // Add one extra 0 as first and last byte to get a clean MOSI whe not transmitting
 
 static uint32_t ledByteToBits(unsigned char octet){ /* only 24 bits used */
   uint32_t result = 0;
   for(int i = 0 ; i < 8 ; i++){
     result <<= 3;
     if(octet & 0x1){
-      result |= 6; // 0b110
+      result |= 3; // 0b011
     }else{
-      result |= 4; // 0b100
+      result |= 1; // 0b001
     }
     octet >>= 1;
   }
@@ -104,8 +107,11 @@ typedef struct {
   unsigned char b;
 } Color_s;
 
-// Color_s ledColors[LED_COUNT_MAX] = {{.r=0x1F, .g=0x1F, .b=0x1F}};
+// Color_s ledColors[LED_COUNT_MAX] = {{.r=0x0F, .g=0x0F, .b=0x0F}};
 Color_s ledColors[LED_COUNT_MAX] = {{.r=0x1F, .g=0x00, .b=0x00}};
+static int redComponent = 0;
+static int greenComponent = 0;
+static int blueComponent = 0;
 
 static void rotateLeds(void){
   #if 0
@@ -155,18 +161,13 @@ static void ledColorsToLedBits(/*Color_s *leds*/){
     memcpy(bitPtr, &blueBits, 3);
     bitPtr += 3;
 
+    *bitPtr++ = 0; // Clean state after each LED to avoid crossover
+
     //
     i++;
   }
-  // One more fake LED, to have something to receive into MISO
-  uint32_t fake = ledByteToBits(0x55);
-  int component = 3;
-  while(component-- > 0){
-    memcpy(bitPtr, &fake, 3); bitPtr += 3;
-  }
-
+  
   *bitPtr++ = 0; // Clean state at end of transmission, so the next transmission has no glitch
-  memset(ledRx, 0, sizeof(ledRx));
 
 }
 
@@ -195,7 +196,7 @@ class Encodeur {
       abHist = 0; sHist = 0;
       name = n;
     };
-    void update(uint16_t portA, uint16_t portB);
+    bool update(uint16_t portA, uint16_t portB);
   private:
     char name;
 
@@ -235,8 +236,8 @@ int Encodeur::pinSValue(uint16_t portA, uint16_t portB){
   }
 }
 
-void Encodeur::update(uint16_t portA, uint16_t portB){
-
+bool Encodeur::update(uint16_t portA, uint16_t portB){
+  bool changed = false;
   abHist <<= 1;
   abHist |= pinAValue(portA, portB);
   abHist <<= 1;
@@ -244,9 +245,41 @@ void Encodeur::update(uint16_t portA, uint16_t portB){
   abHist &= 0x0F;
 
   if(/* 0b1011 */ 0xB == abHist){
+    changed = true;
     Serial.printf("%c-" "\n", name);
+    if('1' == name){
+      if(redComponent > 0){
+        redComponent--;
+      }
+    }
+    if('2' == name){
+      if(greenComponent > 0){
+        greenComponent--;
+      }
+    }
+    if('3' == name){
+      if(blueComponent > 0){
+        blueComponent--;
+      }
+    }
   }else if(/* 0b1110 */ 0xE == abHist){
+    changed = true;
     Serial.printf("%c+" "\n", name);
+    if('1' == name){
+      if(redComponent < 0xFF){
+        redComponent++;
+      }
+    }
+    if('2' == name){
+      if(greenComponent < 0xFF){
+        greenComponent++;
+      }
+    }
+    if('3' == name){
+      if(blueComponent < 0xFF){
+        blueComponent++;
+      }
+    }
   }
 
   sHist <<= 1;
@@ -254,11 +287,16 @@ void Encodeur::update(uint16_t portA, uint16_t portB){
   sHist &= 0x03;
 
   if(/* 0b01 */ 0x1 == sHist){
+    changed = true;
     Serial.printf("%cD" "\n", name);
   }else if(/* 0b10 */ 0x2 == sHist){
+    changed = true;
     Serial.printf("%cU" "\n", name);
   }
-
+  if(changed){
+    Serial.printf("%c r=0x%02X, g=0x%02X, b=0x%02X" "\n", name, redComponent, greenComponent, blueComponent);
+  }
+  return(changed);
 }
 
 PinDescriptor enc1a = {PA4, PIN_DESCRIPTOR_PORT_A, 4};
@@ -299,6 +337,13 @@ void setup()
   digitalWrite(LED_BUILTIN, ledState);
 
   oldMillis = millis();
+  {
+    Color_s color = {.r = 0, .g = 0, .b = 1};
+    for(int i = 0 ; i < LED_COUNT_MAX ; i++){
+      ledColors[i] = color;
+    }
+    ledColorsToLedBits();
+  }
 }
 
 int divider = 0;
@@ -307,25 +352,24 @@ int divider = 0;
 void loop(){
   uint32_t newMillis = millis();
   if(newMillis != oldMillis){
-    if(0 == divider){
-      ledState = (ledState == HIGH) ? LOW : HIGH;
-      digitalWrite(LED_BUILTIN, ledState);
-
-      ledColorsToLedBits(/*ledColors*/);
-      rotateComponents();
-
-      // start full duplex DMA
-      HAL_SPI_Transmit_DMA(&hspi2, ledTx, sizeof(ledTx));
-    }
+    // start full duplex DMA
+    HAL_SPI_Transmit_DMA(&hspi2, ledTx, sizeof(ledTx));
     oldMillis = newMillis;
     divider++;
-    divider &= 0xF;
+    divider &= 0xFF;
   }
-
   uint16_t portA = GPIOA->IDR;
   uint16_t portB = GPIOB->IDR;
-  encodeur1.update(portA, portB);
-  encodeur2.update(portA, portB);
-  encodeur3.update(portA, portB);
-  encodeur4.update(portA, portB);
+  bool updated = false;
+  updated = updated || encodeur1.update(portA, portB);
+  updated = updated || encodeur2.update(portA, portB);
+  updated = updated || encodeur3.update(portA, portB);
+  updated = updated || encodeur4.update(portA, portB);
+  if(updated){
+    Color_s color = {.r=redComponent, .g=greenComponent, .b=blueComponent};
+    for(int i = 0 ; i < LED_COUNT_MAX ; i++){
+      ledColors[i] = color;
+    }
+    ledColorsToLedBits(/*ledColors*/);
+  }
 }
