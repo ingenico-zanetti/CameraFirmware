@@ -78,6 +78,8 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
   }
 }
 
+HardwareSerial piUart(PA10, PA9);
+
 #define LED_COUNT_MAX (16)
 
 #define DATA_BYTES_PER_LED (9)
@@ -107,11 +109,11 @@ typedef struct {
   unsigned char b;
 } Color_s;
 
-// Color_s ledColors[LED_COUNT_MAX] = {{.r=0x0F, .g=0x0F, .b=0x0F}};
-Color_s ledColors[LED_COUNT_MAX] = {{.r=0x1F, .g=0x00, .b=0x00}};
+Color_s ledColors[LED_COUNT_MAX];
 static int redComponent = 0;
 static int greenComponent = 0;
 static int blueComponent = 0;
+static int fanPWM = 77; // start just above 30%
 
 static void rotateLeds(void){
   #if 0
@@ -246,7 +248,7 @@ bool Encodeur::update(uint16_t portA, uint16_t portB){
 
   if(/* 0b1011 */ 0xB == abHist){
     changed = true;
-    Serial.printf("%c-" "\n", name);
+    piUart.printf("%c-" "\n", name);
     if('1' == name){
       if(redComponent > 0){
         redComponent--;
@@ -262,9 +264,14 @@ bool Encodeur::update(uint16_t portA, uint16_t portB){
         blueComponent--;
       }
     }
+    if('4' == name){
+      if(fanPWM > 0){
+        fanPWM--;
+      }
+    }
   }else if(/* 0b1110 */ 0xE == abHist){
     changed = true;
-    Serial.printf("%c+" "\n", name);
+    piUart.printf("%c+" "\n", name);
     if('1' == name){
       if(redComponent < 0xFF){
         redComponent++;
@@ -280,6 +287,11 @@ bool Encodeur::update(uint16_t portA, uint16_t portB){
         blueComponent++;
       }
     }
+    if('4' == name){
+      if(fanPWM < 0xFF){
+        fanPWM++;
+      }
+    }
   }
 
   sHist <<= 1;
@@ -288,13 +300,13 @@ bool Encodeur::update(uint16_t portA, uint16_t portB){
 
   if(/* 0b01 */ 0x1 == sHist){
     changed = true;
-    Serial.printf("%cD" "\n", name);
+    piUart.printf("%cD" "\n", name);
   }else if(/* 0b10 */ 0x2 == sHist){
     changed = true;
-    Serial.printf("%cU" "\n", name);
+    piUart.printf("%cU" "\n", name);
   }
   if(changed){
-    Serial.printf("%c r=0x%02X, g=0x%02X, b=0x%02X" "\n", name, redComponent, greenComponent, blueComponent);
+    // piUart.printf("%c r=0x%02X, g=0x%02X, b=0x%02X, PWM=0x%02X" "\n", name, redComponent, greenComponent, blueComponent, fanPWM);
   }
   return(changed);
 }
@@ -328,6 +340,7 @@ uint32_t oldMillis;
 void setup()
 {
   Serial.begin(115200);
+  piUart.begin(115200, SERIAL_8N1);
   HAL_Init();
 
   MX_DMA_Init();
@@ -336,28 +349,26 @@ void setup()
   pinMode(LED_BUILTIN, INPUT_PULLUP);
   digitalWrite(LED_BUILTIN, ledState);
 
-  oldMillis = millis();
+  // PWM FAN
+  // PWM fan control signal is on PB8
+  // Tachometer readout is on PB9
+  analogWriteResolution(8);
+  analogWriteFrequency(25000);
+  analogWrite(PB8, fanPWM);
+  pinMode(PB9, INPUT_PULLUP);
+
   {
-    Color_s color = {.r = 0, .g = 0, .b = 1};
+    Color_s color = {.r = 0, .g = 0, .b = 0};
     for(int i = 0 ; i < LED_COUNT_MAX ; i++){
       ledColors[i] = color;
     }
     ledColorsToLedBits();
+    HAL_SPI_Transmit_DMA(&hspi2, ledTx, sizeof(ledTx));
   }
 }
 
-int divider = 0;
-
 // ---------------- LOOP ----------------
 void loop(){
-  uint32_t newMillis = millis();
-  if(newMillis != oldMillis){
-    // start full duplex DMA
-    HAL_SPI_Transmit_DMA(&hspi2, ledTx, sizeof(ledTx));
-    oldMillis = newMillis;
-    divider++;
-    divider &= 0xFF;
-  }
   uint16_t portA = GPIOA->IDR;
   uint16_t portB = GPIOB->IDR;
   bool updated = false;
@@ -370,6 +381,12 @@ void loop(){
     for(int i = 0 ; i < LED_COUNT_MAX ; i++){
       ledColors[i] = color;
     }
-    ledColorsToLedBits(/*ledColors*/);
+    ledColorsToLedBits();
+    analogWrite(PB8, fanPWM);
+    HAL_SPI_Transmit_DMA(&hspi2, ledTx, sizeof(ledTx));
+  }
+  if(piUart.available() > 0){
+    uint8_t octet = piUart.read();
+    piUart.write(octet);
   }
 }
